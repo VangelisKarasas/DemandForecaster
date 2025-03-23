@@ -1,0 +1,117 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import pyodbc
+from statsmodels.tsa.arima.model import ARIMA
+import pmdarima as pm  # Auto ARIMA
+from statsmodels.tsa.stattools import adfuller
+from pandas.tseries.offsets import MonthEnd
+
+# Σύνδεση στη βάση με τα στοιχεία που δηλώνουμε στο txt
+
+
+def get_connection_data():
+    f = open("ConnectionData.txt", "r")
+    conn_data = f.read().split(",")
+    server = conn_data[0].strip()
+    database = conn_data[1].strip()
+    return pyodbc.connect(
+        "DRIVER={ODBC Driver 17 for SQL Server};"
+        f"SERVER={server};"
+        f"DATABASE={database};"
+        "Trusted_Connection=yes;"
+    )
+
+
+def get_next_date(single_item_df):
+    last_date = single_item_df.index.max()
+    # Βρίσκουμε τον τέλος του επόμενου μήνα
+    end_of_next_month = (last_date + pd.DateOffset(months=1)
+                         ).replace(day=1) + MonthEnd(0)
+    # Πέρνουμε τις επόμενες μέρες κάθε ημέρα μέχρι τη τελευταία του μήνα
+    future_dates = pd.date_range(
+        start=last_date + pd.Timedelta(days=1), end=end_of_next_month, freq='D')
+
+    return (future_dates, last_date)
+
+
+def adfuller_test(df):
+    result_original = adfuller(df[target])
+    print(f"ADF Statistic (Original): {result_original[0]:.4f}")
+    print(f"p-value (Original): {result_original[1]:.4f}")
+
+    if result_original[1] < 0.05:
+        print("Interpretation: The original series is Stationary.\n")
+    else:
+        print("Interpretation: The original series is Non-Stationary.\n")
+
+
+# SQL Server Connection
+conn = get_connection_data()
+
+# Fetch Data from SQL
+query = "SELECT Code, Date,sales FROM SalesData where date<='10-31-2023' and date>='01-31-2023' order by Date"
+df = pd.read_sql(query, conn)
+cursor = conn.cursor()
+
+# Convert 'Date' column to datetime and set as index
+df['Date'] = pd.to_datetime(df['Date'])
+df.set_index('Date', inplace=True)
+
+# Βρίσκουμε τους κωδικούς των ειδών που υπάρχουν γενικά στο view
+item_codes = df['Code'].unique()
+target = 'sales'
+
+# Μπαίνει μέσα σε ένα ένα τα είδη για να κάνει για το κάθε ένα ξεχωριστά την ανάλογη πρόβλεψη
+for item in item_codes:
+    single_new_item_df = df[df['Code'] == item].copy()
+    single_item_df = single_new_item_df.groupby(['Code', 'Date'])[
+        'sales'].sum().reset_index()
+    single_item_df.set_index(['Date'], inplace=True)
+    print(single_item_df)
+    if single_item_df.shape[0] > 3:
+        future_dates, last_date = get_next_date(single_item_df)
+        # Train όλη τη περίοδο και πρόβλεψη
+        train_size = int(len(single_item_df))
+        train, test = single_item_df[:train_size], single_item_df[train_size:]
+        ad_test = adfuller_test(single_item_df)
+
+        # Find Best ARIMA Order using Auto-ARIMA
+        auto_model = pm.auto_arima(
+            train[target],  stepwise=True, suppress_warnings=True)
+        best_order = auto_model.order
+        print(best_order)
+        # Fit ARIMA model using best parameters
+        model = ARIMA(train[target], order=best_order)
+        model_fit = model.fit()
+
+        forecast = model_fit.predict(start=len(single_item_df), end=len(
+            single_item_df)+len(future_dates)-1)
+        # forecast = model_fit.forecast(steps=len(future_dates))
+
+        # Convert forecast into DataFrame
+        forecast_df = pd.DataFrame(
+            {'Date': future_dates, 'Predicted_Sales': forecast.values, 'Code': item})
+        forecast_df.set_index('Date', inplace=True)
+
+        # Plot Actual vs. Forecasted Sales
+        plt.figure(figsize=(12, 5))
+        plt.plot(single_item_df[target], label="Actual Sales", color='blue')
+        plt.plot(forecast_df['Predicted_Sales'],
+                 label="Predicted Sales", color='red', linestyle='dashed')
+        plt.axvline(x=last_date, color='gray',
+                    linestyle='--', label='Forecast Start')
+        plt.legend()
+        plt.title("Sales Forecast for Next Month")
+        plt.xlabel("Date")
+        plt.ylabel("Sales")
+        plt.show()
+
+        new_df = forecast_df.reset_index()
+        for i in range(len(new_df)):
+            cursor.execute("INSERT INTO ForecastSalesData(Date,Sales,Code) VALUES (?,?,?)",
+                           new_df['Date'].iloc[i], new_df['Predicted_Sales'].iloc[i], new_df['Code'].iloc[i])
+            conn.commit()
+
+    # Close SQL Connection
+conn.close()
