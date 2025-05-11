@@ -23,10 +23,16 @@ def get_connection_data():
     )
 
 
-def get_next_date(single_item_df):
+def get_parameter_data():
+    f = open("ParameterData.txt", "r")
+    param_data = f.read().split(",")
+    return (param_data)
+
+
+def get_next_date(single_item_df: object, month: int):
     last_date = single_item_df.index.max()
     # Βρίσκουμε τον τέλος του επόμενου μήνα
-    end_of_next_month = (last_date + pd.DateOffset(months=1)
+    end_of_next_month = (last_date + pd.DateOffset(months=month)
                          ).replace(day=1) + MonthEnd(0)
     # Πέρνουμε τις επόμενες μέρες κάθε ημέρα μέχρι τη τελευταία του μήνα
     future_dates = pd.date_range(
@@ -49,6 +55,7 @@ def adfuller_test(df):
 # SQL Server Connection
 conn = get_connection_data()
 
+
 # Fetch Data from SQL
 query = "SELECT Code, Date,sales FROM SalesData where date<='10-31-2023' and date>='01-31-2023' order by Date"
 df = pd.read_sql(query, conn)
@@ -62,6 +69,7 @@ df.set_index('Date', inplace=True)
 item_codes = df['Code'].unique()
 target = 'sales'
 
+
 # Μπαίνει μέσα σε ένα ένα τα είδη για να κάνει για το κάθε ένα ξεχωριστά την ανάλογη πρόβλεψη
 for item in item_codes:
     single_new_item_df = df[df['Code'] == item].copy()
@@ -70,11 +78,11 @@ for item in item_codes:
     single_item_df.set_index(['Date'], inplace=True)
     print(single_item_df)
     if single_item_df.shape[0] > 3:
-        future_dates, last_date = get_next_date(single_item_df)
+        future_dates, last_date = get_next_date(single_item_df, 2)
         # Train όλη τη περίοδο και πρόβλεψη
         train_size = int(len(single_item_df))
         train, test = single_item_df[:train_size], single_item_df[train_size:]
-        ad_test = adfuller_test(single_item_df)
+        # ad_test = adfuller_test(single_item_df)
 
         # Find Best ARIMA Order using Auto-ARIMA
         auto_model = pm.auto_arima(
@@ -94,24 +102,38 @@ for item in item_codes:
             {'Date': future_dates, 'Predicted_Sales': forecast.values, 'Code': item})
         forecast_df.set_index('Date', inplace=True)
 
-        # Plot Actual vs. Forecasted Sales
-        plt.figure(figsize=(12, 5))
-        plt.plot(single_item_df[target], label="Actual Sales", color='blue')
-        plt.plot(forecast_df['Predicted_Sales'],
-                 label="Predicted Sales", color='red', linestyle='dashed')
-        plt.axvline(x=last_date, color='gray',
-                    linestyle='--', label='Forecast Start')
-        plt.legend()
-        plt.title("Sales Forecast for Next Month")
-        plt.xlabel("Date")
-        plt.ylabel("Sales")
-        plt.show()
+        # # Plot Actual vs. Forecasted Sales
+        # plt.figure(figsize=(12, 5))
+        # plt.plot(single_item_df[target], label="Actual Sales", color='blue')
+        # plt.plot(forecast_df['Predicted_Sales'],
+        #          label="Predicted Sales", color='red', linestyle='dashed')
+        # plt.axvline(x=last_date, color='gray',
+        #             linestyle='--', label='Forecast Start')
+        # plt.legend()
+        # plt.title("Sales Forecast for Next Month")
+        # plt.xlabel("Date")
+        # plt.ylabel("Sales")
+        # plt.show()
 
         new_df = forecast_df.reset_index()
-        for i in range(len(new_df)):
-            cursor.execute("INSERT INTO ForecastSalesData(Date,Sales,Code) VALUES (?,?,?)",
-                           new_df['Date'].iloc[i], new_df['Predicted_Sales'].iloc[i], new_df['Code'].iloc[i])
-            conn.commit()
+        # for i in range(len(new_df)):
+        #     cursor.execute("INSERT INTO ForecastSalesData(Date,Sales,Code) VALUES (?,?,?)",
+        #                    new_df['Date'].iloc[i], new_df['Predicted_Sales'].iloc[i], new_df['Code'].iloc[i])
+        #     conn.commit()
 
     # Close SQL Connection
+
+# INSERT INTO EndOfMonthSales(Sales, Code, Date)
+# SELECT
+#     SUM(sales) AS TotalSales,
+#     Code,
+#     '2023-12-31' AS Date
+# FROM
+#     SalesMergeForecast
+# WHERE
+#     Date >= '2023-11-01' AND Date <= '2023-12-31'
+# GROUP BY
+#     Code;
+
+
 conn.close()
